@@ -1,0 +1,701 @@
+openapi: 3.0.0
+info:
+  title: PathoSaathi Authentication API
+  description: |
+    Authentication API for PathoSaathi platform with domain isolation support.
+
+    This API handles user authentication, token management, and domain-based access control.
+    All endpoints support multi-tenant architecture with domain isolation.
+  version: 1.0.0
+  contact:
+    email: support@pathosaathi.in
+
+servers:
+  - url: http://localhost:9090/api/v1/auth
+    description: Development server
+  - url: https://api.pathosaathi.in/api/v1/auth
+    description: Production server
+
+tags:
+  - name: Authentication
+    description: User authentication and session management
+  - name: Token Management
+    description: JWT token refresh and validation
+  - name: User Management
+    description: User information and profile management
+
+paths:
+  /login:
+    post:
+      tags:
+        - Authentication
+      summary: User login with domain validation
+      description: |
+        Authenticate user with email/phone and password. Validates domain access based on user's partner configuration.
+        Returns JWT access and refresh tokens upon successful authentication.
+      operationId: login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+            examples:
+              emailLogin:
+                summary: Login with email
+                value:
+                  email: "user@example.com"
+                  password: "SecurePassword123"
+              phoneLogin:
+                summary: Login with phone
+                value:
+                  phone: "9876543210"
+                  password: "SecurePassword123"
+      responses:
+        "200":
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginResponse"
+        "400":
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Domain mismatch or account inactive
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "423":
+          description: Account locked
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Too many login attempts
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /refresh:
+    post:
+      tags:
+        - Token Management
+      summary: Refresh access token
+      description: |
+        Generate new access and refresh tokens using a valid refresh token.
+        Validates domain access and ensures user/partner accounts are still active.
+      operationId: refreshToken
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RefreshTokenRequest"
+            example:
+              refreshToken: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+      responses:
+        "200":
+          description: Token refreshed successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenResponse"
+        "401":
+          description: Invalid or expired refresh token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Domain mismatch or account inactive
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /me:
+    get:
+      tags:
+        - User Management
+      summary: Get current user information
+      description: |
+        Retrieve authenticated user's profile information including partner and lab details.
+        Requires valid JWT access token in Authorization header.
+      operationId: getMe
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: Authorization
+          in: header
+          required: true
+          description: JWT access token (Bearer token)
+          schema:
+            type: string
+            example: "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+      responses:
+        "200":
+          description: User information retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserInfoResponse"
+        "401":
+          description: Unauthorized - Invalid or missing token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: User not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /setup-password:
+    post:
+      tags:
+        - Authentication
+      summary: Setup password for staff invitation
+      description: |
+        Set password for staff user using invitation token.
+        Validates token, password requirements, and domain access.
+      operationId: setupPassword
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PasswordSetupRequest"
+            example:
+              token: "invitation-token-here"
+              password: "NewSecurePassword123"
+              confirmPassword: "NewSecurePassword123"
+      responses:
+        "200":
+          description: Password setup completed successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginResponse"
+        "400":
+          description: Validation error or invalid token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Domain mismatch
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "501":
+          description: Feature not yet implemented
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /logout:
+    post:
+      tags:
+        - Authentication
+      summary: Logout user
+      description: |
+        Logout current user and clear session.
+        Optionally clears refresh token cookie if present.
+        Requires valid JWT access token in Authorization header.
+      operationId: logout
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: Authorization
+          in: header
+          required: true
+          description: JWT access token (Bearer token)
+          schema:
+            type: string
+            example: "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+      responses:
+        "200":
+          description: Logged out successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  message:
+                    type: string
+                    example: "Logged out successfully"
+                  data:
+                    type: object
+                    example: {}
+
+  /verify-invitation/{token}:
+    get:
+      tags:
+        - Authentication
+      summary: Verify staff invitation token
+      description: |
+        Verify if a staff invitation token is valid and not expired.
+        Returns basic invitation information without sensitive data.
+      operationId: verifyInvitation
+      parameters:
+        - name: token
+          in: path
+          required: true
+          description: Staff invitation token
+          schema:
+            type: string
+            example: "invitation-token-here"
+      responses:
+        "200":
+          description: Token is valid
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InvitationVerificationResponse"
+        "400":
+          description: Invalid or expired token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "501":
+          description: Feature not yet implemented
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /validate-domain:
+    get:
+      tags:
+        - Authentication
+      summary: Validate domain access
+      description: |
+        Validate if current domain is allowed for authenticated user.
+        Checks domain restrictions based on user role and partner configuration.
+        Requires valid JWT access token in Authorization header.
+      operationId: validateDomain
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: Authorization
+          in: header
+          required: true
+          description: JWT access token (Bearer token)
+          schema:
+            type: string
+            example: "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+      responses:
+        "200":
+          description: Domain access validated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  message:
+                    type: string
+                    example: "Domain access validated"
+                  data:
+                    type: object
+                    properties:
+                      domain:
+                        type: string
+                        example: "partner.example.com"
+                      userRole:
+                        type: string
+                        example: "PARTNER"
+                      isRootUser:
+                        type: boolean
+                        example: false
+                      partnerDomain:
+                        type: string
+                        example: "partner.example.com"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Domain access denied
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /health:
+    get:
+      tags:
+        - Authentication
+      summary: Authentication service health check
+      description: Check if authentication service is running
+      operationId: authHealth
+      responses:
+        "200":
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  message:
+                    type: string
+                    example: "PathoSaathi Authentication Service is running"
+                  timestamp:
+                    type: string
+                    format: date-time
+                    example: "2025-11-30T00:05:03.000Z"
+                  version:
+                    type: string
+                    example: "1.0.0"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT access token obtained from login endpoint
+
+  schemas:
+    LoginRequest:
+      type: object
+      required:
+        - password
+      properties:
+        email:
+          type: string
+          format: email
+          description: User email address
+          example: "user@example.com"
+        phone:
+          type: string
+          pattern: '^[6-9]\d{9}$'
+          description: Indian phone number (10 digits starting with 6-9)
+          example: "9876543210"
+        password:
+          type: string
+          format: password
+          minLength: 8
+          description: User password
+          example: "SecurePassword123"
+      oneOf:
+        - required: [email]
+        - required: [phone]
+
+    LoginResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        message:
+          type: string
+          example: "Login successful"
+        data:
+          type: object
+          properties:
+            user:
+              $ref: "#/components/schemas/User"
+            tokens:
+              $ref: "#/components/schemas/TokenPair"
+            session:
+              $ref: "#/components/schemas/SessionInfo"
+
+    RefreshTokenRequest:
+      type: object
+      required:
+        - refreshToken
+      properties:
+        refreshToken:
+          type: string
+          description: JWT refresh token
+          example: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+
+    TokenResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        message:
+          type: string
+          example: "Token refreshed successfully"
+        data:
+          $ref: "#/components/schemas/TokenPair"
+
+    PasswordSetupRequest:
+      type: object
+      required:
+        - token
+        - password
+        - confirmPassword
+      properties:
+        token:
+          type: string
+          description: Staff invitation token
+          example: "invitation-token-here"
+        password:
+          type: string
+          format: password
+          minLength: 8
+          description: New password
+          example: "NewSecurePassword123"
+        confirmPassword:
+          type: string
+          format: password
+          description: Password confirmation (must match password)
+          example: "NewSecurePassword123"
+
+    User:
+      type: object
+      properties:
+        id:
+          type: string
+          description: User ID
+          example: "507f1f77bcf86cd799439011"
+        identifier:
+          type: string
+          description: User identifier
+          example: "PS_USR_251129_0001"
+        name:
+          type: string
+          description: User full name
+          example: "John Doe"
+        email:
+          type: string
+          format: email
+          description: User email address
+          example: "john.doe@example.com"
+        phone:
+          type: string
+          description: User phone number
+          example: "9876543210"
+        role:
+          type: string
+          enum:
+            [SUPERADMIN, PARTNER, LAB_OWNER, TECH, RECEPTION, CUSTOMER_SUPPORT]
+          description: User role
+          example: "PARTNER"
+        isRootUser:
+          type: boolean
+          description: Whether user is a root user (PathoSaathi admin)
+          example: false
+        partner:
+          $ref: "#/components/schemas/PartnerInfo"
+        lab:
+          $ref: "#/components/schemas/LabInfo"
+
+    UserInfoResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        message:
+          type: string
+          example: "User information retrieved"
+        data:
+          type: object
+          properties:
+            id:
+              type: string
+              example: "507f1f77bcf86cd799439011"
+            identifier:
+              type: string
+              example: "PS_USR_251129_0001"
+            name:
+              type: string
+              example: "John Doe"
+            email:
+              type: string
+              example: "john.doe@example.com"
+            phone:
+              type: string
+              example: "9876543210"
+            role:
+              type: string
+              example: "PARTNER"
+            isRootUser:
+              type: boolean
+              example: false
+            emailVerified:
+              type: boolean
+              example: true
+            phoneVerified:
+              type: boolean
+              example: true
+            lastLoginAt:
+              type: string
+              format: date-time
+            createdAt:
+              type: string
+              format: date-time
+            partner:
+              $ref: "#/components/schemas/PartnerInfo"
+            lab:
+              $ref: "#/components/schemas/LabInfo"
+
+    PartnerInfo:
+      type: object
+      properties:
+        id:
+          type: string
+          example: "507f1f77bcf86cd799439012"
+        companyName:
+          type: string
+          example: "Example Lab Partner"
+        domain:
+          type: string
+          example: "partner.example.com"
+        partnerType:
+          type: string
+          enum: [COMMISSION, WHITE_LABEL]
+          example: "WHITE_LABEL"
+        branding:
+          type: object
+          description: Partner branding configuration
+
+    LabInfo:
+      type: object
+      properties:
+        id:
+          type: string
+          example: "507f1f77bcf86cd799439013"
+        labName:
+          type: string
+          example: "Example Diagnostic Lab"
+        address:
+          type: object
+          description: Lab address information
+        phone:
+          type: string
+          example: "9876543211"
+        email:
+          type: string
+          example: "lab@example.com"
+
+    TokenPair:
+      type: object
+      properties:
+        accessToken:
+          type: string
+          description: JWT access token (short-lived)
+          example: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+        refreshToken:
+          type: string
+          description: JWT refresh token (long-lived)
+          example: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+        expiresIn:
+          type: integer
+          description: Access token expiration time in seconds
+          example: 604800
+
+    SessionInfo:
+      type: object
+      properties:
+        session:
+          type: string
+          description: Session ID
+          example: "507f1f77bcf86cd799439014"
+        loginAt:
+          type: string
+          format: date-time
+          description: Login timestamp
+          example: "2025-11-30T00:05:03.000Z"
+        ipAddress:
+          type: string
+          format: ipv4
+          description: Client IP address
+          example: "192.168.1.1"
+        domain:
+          type: string
+          description: Login domain
+          example: "partner.example.com"
+
+    InvitationVerificationResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        message:
+          type: string
+          example: "Token is valid"
+        data:
+          type: object
+          properties:
+            email:
+              type: string
+              format: email
+              example: "staff@example.com"
+            staffName:
+              type: string
+              example: "Jane Smith"
+            expiresAt:
+              type: string
+              format: date-time
+              example: "2025-12-30T00:00:00.000Z"
+            isValid:
+              type: boolean
+              example: true
+
+    ErrorResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: false
+        message:
+          type: string
+          description: Error message
+          example: "Invalid email/phone or password"
+        errorCode:
+          type: string
+          enum:
+            - INVALID_CREDENTIALS
+            - DOMAIN_MISMATCH
+            - ACCOUNT_LOCKED
+            - ACCOUNT_INACTIVE
+            - TOKEN_EXPIRED
+            - TOKEN_INVALID
+            - PARTNER_INACTIVE
+            - DOMAIN_NOT_ALLOWED
+            - ROOT_DOMAIN_REQUIRED
+            - PASSWORD_MISMATCH
+            - SETUP_TOKEN_INVALID
+          description: Error code for programmatic handling
+          example: "INVALID_CREDENTIALS"
+        details:
+          type: object
+          description: Additional error details
+          example:
+            field: "password"
+            minLength: 8
