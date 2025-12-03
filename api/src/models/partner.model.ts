@@ -20,7 +20,9 @@ export interface IPartner extends ITenantDocument {
 
   email: string;
   phone: string;
-  domain?: string;
+
+  subdomain?: string;
+  customDomain?: string;
 
   address?: mongoose.Types.ObjectId | IAddress;
 
@@ -62,6 +64,9 @@ export interface IPartner extends ITenantDocument {
   calculateCommission(labSubscriptionAmount: number): number;
   canWithdraw(): boolean;
   initializeIdentifierConfig(): void;
+  getTenantDomain(): string | null;
+  isAccessibleFromDomain(hostname: string): boolean;
+  isRootPartner(): boolean;
 }
 
 /**
@@ -70,6 +75,9 @@ export interface IPartner extends ITenantDocument {
 export interface IPartnerModel extends Model<IPartner> {
   findByReferralCode(referralCode: string): Promise<IPartner | null>;
   findByIdentifier(identifier: string): Promise<IPartner | null>;
+  findByDomain(hostname: string): Promise<IPartner | null>;
+  findBySubdomain(subdomain: string): Promise<IPartner | null>;
+  findByCustomDomain(customDomain: string): Promise<IPartner | null>;
   getExpiringPartners(days?: number): Promise<IPartner[]>;
 }
 
@@ -113,13 +121,55 @@ const partnerSchema = new Schema<IPartner>(
       match: /^[6-9]\d{9}$/,
     },
 
-    domain: {
+    subdomain: {
       type: String,
       trim: true,
       lowercase: true,
-      match: /^[a-z0-9.-]+\.[a-z]{2,}$/,
-      sparse: true,
       unique: true,
+      sparse: true,
+      match: /^[a-z0-9-]{1,63}$/,
+      validate: {
+        validator: function (this: IPartner, value: string) {
+          if (value?.toLowerCase() === "app") {
+            return !!(
+              this.companyName &&
+              this.companyName.toLowerCase().includes("pathosaathi")
+            );
+          }
+          const reserved = [
+            "www",
+            "admin",
+            "api",
+            "ftp",
+            "mail",
+            "smtp",
+            "pop",
+            "imap",
+          ];
+          return !reserved.includes(value?.toLowerCase());
+        },
+        message: "Subdomain cannot be a reserved word",
+      },
+    },
+
+    customDomain: {
+      type: String,
+      trim: true,
+      lowercase: true,
+      unique: true,
+      sparse: true,
+      match: /^[a-z0-9.-]+\.[a-z]{2,}$/,
+      validate: {
+        validator: function (value: string) {
+          const mainDomains = [
+            "pathosaathi.in",
+            "app.pathosaathi.in",
+            "admin.pathosaathi.in",
+          ];
+          return !mainDomains.includes(value?.toLowerCase());
+        },
+        message: "Custom domain cannot be a platform domain",
+      },
     },
 
     address: {
@@ -277,11 +327,10 @@ const partnerSchema = new Schema<IPartner>(
   }
 );
 
-// identifier index is created by unique: true, no need for explicit index
 partnerSchema.index({ email: 1, tenantPrefix: 1 });
 partnerSchema.index({ phone: 1, tenantPrefix: 1 });
-// domain index is created by unique: true, no need for explicit index
-// referralCode index is created by unique: true, no need for explicit index
+partnerSchema.index({ subdomain: 1 });
+partnerSchema.index({ customDomain: 1 });
 partnerSchema.index({ partnerType: 1, isActive: 1 });
 partnerSchema.index({ paidStatus: 1 });
 partnerSchema.index({ expiryDate: 1, isActive: 1 });
@@ -296,6 +345,11 @@ partnerSchema.pre("save", async function (next) {
 
     if (!this.referralCode) {
       this.referralCode = this.generateReferralCode();
+    }
+
+    // Auto-set subdomain to "app" for root partners if not set
+    if (this.isRootPartner() && !this.subdomain) {
+      this.subdomain = "app";
     }
 
     if (
@@ -356,6 +410,54 @@ partnerSchema.methods.initializeIdentifierConfig = function (): void {
   }
 };
 
+/**
+ * Get the tenant domain for this partner
+ * Returns subdomain or custom domain if configured
+ */
+partnerSchema.methods.getTenantDomain = function (): string | null {
+  if (this.customDomain) {
+    return this.customDomain;
+  }
+  if (this.subdomain) {
+    return this.subdomain;
+  }
+  return null;
+};
+
+/**
+ * Check if this partner can be accessed from the given hostname
+ */
+partnerSchema.methods.isAccessibleFromDomain = function (
+  hostname: string
+): boolean {
+  const normalizedHostname = hostname.toLowerCase();
+
+  if (
+    this.customDomain &&
+    this.customDomain.toLowerCase() === normalizedHostname
+  ) {
+    return true;
+  }
+
+  if (this.subdomain) {
+    const subdomainPattern = `${this.subdomain.toLowerCase()}.`;
+    if (normalizedHostname.startsWith(subdomainPattern)) {
+      return true;
+    }
+  }
+
+  return false;
+};
+
+/**
+ * Check if this partner is a root partner (PathoSaathi)
+ */
+partnerSchema.methods.isRootPartner = function (): boolean {
+  return (
+    this.companyName && this.companyName.toLowerCase().includes("pathosaathi")
+  );
+};
+
 partnerSchema.statics.findByReferralCode = function (referralCode: string) {
   return this.findOne({
     referralCode: referralCode.toUpperCase(),
@@ -365,6 +467,45 @@ partnerSchema.statics.findByReferralCode = function (referralCode: string) {
 
 partnerSchema.statics.findByIdentifier = function (identifier: string) {
   return this.findOne({ identifier: identifier.toUpperCase() });
+};
+
+/**
+ * Find partner by hostname (subdomain or custom domain)
+ */
+partnerSchema.statics.findByDomain = function (hostname: string) {
+  const normalizedHostname = hostname.toLowerCase();
+
+  return this.findOne({
+    customDomain: normalizedHostname,
+    isActive: true,
+  }).then((partner: IPartner | null) => {
+    if (partner) return partner;
+
+    const domainParts = normalizedHostname.split(".");
+    if (domainParts.length > 1) {
+      const subdomain = domainParts[0];
+      return this.findOne({
+        subdomain: subdomain,
+        isActive: true,
+      });
+    }
+
+    return null;
+  });
+};
+
+partnerSchema.statics.findBySubdomain = function (subdomain: string) {
+  return this.findOne({
+    subdomain: subdomain.toLowerCase(),
+    isActive: true,
+  });
+};
+
+partnerSchema.statics.findByCustomDomain = function (customDomain: string) {
+  return this.findOne({
+    customDomain: customDomain.toLowerCase(),
+    isActive: true,
+  });
 };
 
 partnerSchema.statics.getExpiringPartners = function (days: number = 30) {

@@ -1,7 +1,7 @@
 /**
- * Super Admin User Seeder
- * Creates PathoSaathi partner and super admin user
- * Also creates default identifier configurations
+ * Super Admin User Seeder with Multi-Tenant Support
+ * Creates PathoSaathi partner and super admin user with subdomain/custom domain configuration
+ * Also creates default identifier configurations and branding
  *
  * Run this script to create the initial super admin:
  * ts-node super-admin.seed.ts
@@ -23,6 +23,7 @@ import { DatabaseIdentifierConfigManager } from "../services/database-identifier
 import { uploadImage } from "../utils/cloudinary.util";
 import { IThemeModel } from "../models/theme.model";
 import seedFonts from "./font.seed";
+import MultiTenantMiddleware from "../middleware/multi-tenant.middleware";
 
 const validateEmail = (email: string) => {
   if (!validator.validate(email)) {
@@ -52,10 +53,34 @@ const validateName = (name: string) => {
   return true;
 };
 
-const validateDomain = (domain: string) => {
-  if (domain && !/^[a-z0-9.-]+\.[a-z]{2,}$/i.test(domain)) {
-    return "Please enter a valid domain (e.g., example.in)";
+const validateSubdomain = (subdomain: string) => {
+  if (!subdomain) {
+    return true; // Optional
   }
+
+  // For PathoSaathi root partner, allow "app" even though it's normally reserved
+  if (subdomain.toLowerCase() === "app") {
+    return true;
+  }
+
+  const validation = MultiTenantMiddleware.validateSubdomain(subdomain);
+  if (!validation.valid) {
+    return validation.error;
+  }
+
+  return true;
+};
+
+const validateCustomDomain = (domain: string) => {
+  if (!domain) {
+    return true; // Optional
+  }
+
+  const validation = MultiTenantMiddleware.validateCustomDomain(domain);
+  if (!validation.valid) {
+    return validation.error;
+  }
+
   return true;
 };
 
@@ -133,10 +158,155 @@ const createDefaultIdentifierConfigurations = async (
   }
 };
 
+/**
+ * Create default branding for PathoSaathi
+ */
+const createPathoSaathiBranding = async (_partnerId: string) => {
+  const BrandingModel = ModelFactory.getBrandingModel();
+  const ThemeModel = ModelFactory.getThemeModel() as IThemeModel;
+
+  const existingBranding = await BrandingModel.findOne({
+    tenantPrefix: DEFAULT_TENANTS.ROOT,
+  });
+
+  if (existingBranding) {
+    console.log(
+      chalk.yellow(
+        "\n⚠️  A branding record already exists. Skipping branding creation."
+      )
+    );
+    return existingBranding;
+  }
+
+  console.log(chalk.blue("\n🎨 Creating branding for PathoSaathi..."));
+
+  const brandingAnswers = await inquirer.prompt([
+    {
+      type: "input",
+      name: "name",
+      message: "Enter branding name:",
+      default: "PathoSaathi",
+      validate: (input: string) => {
+        if (input.length < 2) {
+          return "Branding name must be at least 2 characters long";
+        }
+        return true;
+      },
+    },
+    {
+      type: "input",
+      name: "description",
+      message: "Enter branding description (optional):",
+    },
+    {
+      type: "input",
+      name: "themeIdentifier",
+      message: "Enter theme identifier to link:",
+      validate: async (input: string) => {
+        if (!input || input.trim().length === 0) {
+          return "Theme identifier is required";
+        }
+        const themeModel = ModelFactory.getThemeModel() as IThemeModel;
+        const theme = await themeModel.findByIdentifier(input.toUpperCase());
+        if (!theme) {
+          return `Theme with identifier "${input.toUpperCase()}" not found. Please check available themes.`;
+        }
+        return true;
+      },
+    },
+  ]);
+
+  const theme = await ThemeModel.findByIdentifier(
+    brandingAnswers.themeIdentifier.toUpperCase()
+  );
+
+  if (!theme) {
+    console.log(
+      chalk.red(
+        `❌ Theme with identifier "${brandingAnswers.themeIdentifier.toUpperCase()}" not found.`
+      )
+    );
+    throw new Error("Theme not found");
+  }
+
+  console.log(chalk.blue("📤 Uploading logo to Cloudinary..."));
+
+  const logoPath = path.resolve(__dirname, "../../public/pathosaathi-logo.png");
+
+  let logoUrl: string;
+
+  if (!fs.existsSync(logoPath)) {
+    console.log(
+      chalk.yellow(
+        `⚠️ Logo file not found at: ${logoPath}\nSkipping logo upload.`
+      )
+    );
+    logoUrl = ""; // Will use default logo or no logo
+  } else {
+    try {
+      const uploadResult = await uploadImage(logoPath, {
+        folder: "pathosaathi/branding",
+        tags: ["logo", "branding", "pathosaathi"],
+      });
+      logoUrl = uploadResult.url;
+      console.log(
+        chalk.green(`✅ Logo uploaded successfully: ${uploadResult.publicId}`)
+      );
+    } catch (error) {
+      console.error(
+        chalk.yellow("⚠️ Error uploading logo to Cloudinary:"),
+        error
+      );
+      console.log(chalk.yellow("Continuing without logo upload..."));
+      logoUrl = ""; // Continue without logo
+    }
+  }
+
+  const branding = new BrandingModel({
+    tenantPrefix: DEFAULT_TENANTS.ROOT,
+    name: brandingAnswers.name,
+    description: brandingAnswers.description || undefined,
+    logo: logoUrl || undefined,
+    theme: theme._id,
+    isActive: true,
+  });
+
+  await branding.save();
+
+  console.log(
+    chalk.green(
+      `✅ Branding created successfully: ${branding.name} (${branding.identifier})`
+    )
+  );
+  console.log(chalk.cyan(`   Theme: ${theme.name} (${theme.identifier})`));
+  if (logoUrl) {
+    console.log(chalk.cyan(`   Logo URL: ${logoUrl}`));
+  }
+
+  return branding;
+};
+
+/**
+ * Update partner with branding reference
+ */
+const updatePartnerBranding = async (partnerId: string, brandingId: string) => {
+  const PartnerModel = ModelFactory.getPartnerModel();
+
+  await PartnerModel.findByIdAndUpdate(partnerId, {
+    branding: brandingId,
+  });
+
+  console.log(chalk.green("✅ Partner updated with branding reference"));
+};
+
 const seedSuperAdmin = async () => {
   try {
+    console.log(
+      chalk.bold.blue("\n🚀 PathoSaathi Multi-Tenant Super Admin Setup\n")
+    );
+
     await mongoose.connect(env.MONGODB_URI);
-    console.log(chalk.green("Connected to MongoDB"));
+    console.log(chalk.green("✅ Connected to MongoDB"));
 
     const UserModel = ModelFactory.getUserModel(DEFAULT_TENANTS.ROOT);
     const PartnerModel = ModelFactory.getPartnerModel();
@@ -168,7 +338,9 @@ const seedSuperAdmin = async () => {
     });
 
     if (!pathosaathiPartner) {
-      console.log(chalk.blue("Creating PathoSaathi partner..."));
+      console.log(
+        chalk.blue("Creating PathoSaathi partner with multi-tenant support...")
+      );
 
       const partnerAnswers = await inquirer.prompt([
         {
@@ -192,9 +364,18 @@ const seedSuperAdmin = async () => {
         },
         {
           type: "input",
-          name: "domain",
-          message: "Enter PathoSaathi domain (optional, e.g., pathosaathi.in):",
-          validate: validateDomain,
+          name: "subdomain",
+          message:
+            "Enter subdomain for PathoSaathi (optional, e.g., 'admin' for admin.yourdomain.com):",
+          default: "admin",
+          validate: validateSubdomain,
+        },
+        {
+          type: "input",
+          name: "customDomain",
+          message:
+            "Enter custom domain for PathoSaathi (optional, e.g., pathosaathi.in):",
+          validate: validateCustomDomain,
         },
       ]);
 
@@ -210,7 +391,8 @@ const seedSuperAdmin = async () => {
         ownerName: partnerAnswers.ownerName,
         email: partnerAnswers.email,
         phone: partnerAnswers.phone,
-        domain: partnerAnswers.domain || undefined,
+        subdomain: partnerAnswers.subdomain || undefined,
+        customDomain: partnerAnswers.customDomain || undefined,
         partnerType: PARTNER_TYPES.WHITE_LABEL,
         registrationFee: PARTNER_FEES[PARTNER_TYPES.WHITE_LABEL],
         paidStatus: PAYMENT_STATUS.PAID,
@@ -223,8 +405,101 @@ const seedSuperAdmin = async () => {
 
       await pathosaathiPartner.save();
       console.log(chalk.green("✅ PathoSaathi partner created successfully!"));
+
+      // Display access information
+      if (partnerAnswers.subdomain) {
+        const subdomainUrl = MultiTenantMiddleware.generateSubdomainUrl(
+          partnerAnswers.subdomain
+        );
+        console.log(chalk.cyan(`📍 Subdomain URL: ${subdomainUrl}`));
+      }
+
+      if (partnerAnswers.customDomain) {
+        console.log(
+          chalk.cyan(`🌐 Custom Domain: https://${partnerAnswers.customDomain}`)
+        );
+      }
     } else {
       console.log(chalk.blue("PathoSaathi partner already exists."));
+
+      // Check if partner has multi-tenant fields configured
+      if (!pathosaathiPartner.subdomain && !pathosaathiPartner.customDomain) {
+        console.log(
+          chalk.yellow(
+            "⚠️  Partner exists but lacks multi-tenant configuration."
+          )
+        );
+
+        const { shouldUpdateTenant } = await inquirer.prompt([
+          {
+            type: "confirm",
+            name: "shouldUpdateTenant",
+            message:
+              "Do you want to add multi-tenant configuration to the existing partner?",
+            default: true,
+          },
+        ]);
+
+        if (shouldUpdateTenant) {
+          const tenantAnswers = await inquirer.prompt([
+            {
+              type: "input",
+              name: "subdomain",
+              message:
+                "Enter subdomain for PathoSaathi (optional, e.g., 'admin'):",
+              default: "admin",
+              validate: validateSubdomain,
+            },
+            {
+              type: "input",
+              name: "customDomain",
+              message: "Enter custom domain (optional, e.g., pathosaathi.in):",
+              validate: validateCustomDomain,
+            },
+          ]);
+
+          pathosaathiPartner.subdomain = tenantAnswers.subdomain || undefined;
+          pathosaathiPartner.customDomain =
+            tenantAnswers.customDomain || undefined;
+          await pathosaathiPartner.save();
+
+          console.log(chalk.green("✅ Multi-tenant configuration updated!"));
+
+          if (tenantAnswers.subdomain) {
+            const subdomainUrl = MultiTenantMiddleware.generateSubdomainUrl(
+              tenantAnswers.subdomain
+            );
+            console.log(chalk.cyan(`📍 Subdomain URL: ${subdomainUrl}`));
+          }
+
+          if (tenantAnswers.customDomain) {
+            console.log(
+              chalk.cyan(
+                `🌐 Custom Domain: https://${tenantAnswers.customDomain}`
+              )
+            );
+          }
+        }
+      } else {
+        console.log(
+          chalk.green("✅ Multi-tenant configuration already exists")
+        );
+
+        if (pathosaathiPartner.subdomain) {
+          const subdomainUrl = MultiTenantMiddleware.generateSubdomainUrl(
+            pathosaathiPartner.subdomain
+          );
+          console.log(chalk.cyan(`📍 Subdomain URL: ${subdomainUrl}`));
+        }
+
+        if (pathosaathiPartner.customDomain) {
+          console.log(
+            chalk.cyan(
+              `🌐 Custom Domain: https://${pathosaathiPartner.customDomain}`
+            )
+          );
+        }
+      }
     }
 
     const answers = await inquirer.prompt([
@@ -324,129 +599,68 @@ const seedSuperAdmin = async () => {
     console.log(chalk.blue("\n📝 Seeding fonts..."));
     await seedFonts();
 
-    const BrandingModel = ModelFactory.getBrandingModel();
-    const ThemeModel = ModelFactory.getThemeModel() as IThemeModel;
+    try {
+      const branding = await createPathoSaathiBranding(partnerId);
 
-    const existingBranding = await BrandingModel.findOne({
-      tenantPrefix: DEFAULT_TENANTS.ROOT,
-    });
-
-    if (existingBranding) {
+      if (branding) {
+        await updatePartnerBranding(partnerId, String(branding._id));
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
       console.log(
-        chalk.yellow(
-          "\n⚠️  A branding record already exists. Skipping branding creation."
-        )
+        chalk.yellow("⚠️ Branding creation skipped due to error:", message)
       );
-    } else {
-      console.log(chalk.blue("\n🎨 Creating branding for PathoSaathi..."));
-
-      const brandingAnswers = await inquirer.prompt([
-        {
-          type: "input",
-          name: "name",
-          message: "Enter branding name:",
-          default: "PathoSaathi Branding",
-          validate: (input: string) => {
-            if (input.length < 2) {
-              return "Branding name must be at least 2 characters long";
-            }
-            return true;
-          },
-        },
-        {
-          type: "input",
-          name: "description",
-          message: "Enter branding description (optional):",
-        },
-        {
-          type: "input",
-          name: "themeIdentifier",
-          message: "Enter theme identifier to link:",
-          validate: async (input: string) => {
-            if (!input || input.trim().length === 0) {
-              return "Theme identifier is required";
-            }
-            const themeModel = ModelFactory.getThemeModel() as IThemeModel;
-            const theme = await themeModel.findByIdentifier(
-              input.toUpperCase()
-            );
-            if (!theme) {
-              return `Theme with identifier "${input.toUpperCase()}" not found. Please check available themes.`;
-            }
-            return true;
-          },
-        },
-      ]);
-
-      const theme = await ThemeModel.findByIdentifier(
-        brandingAnswers.themeIdentifier.toUpperCase()
-      );
-
-      if (!theme) {
-        console.log(
-          chalk.red(
-            `❌ Theme with identifier "${brandingAnswers.themeIdentifier.toUpperCase()}" not found.`
-          )
-        );
-        await mongoose.disconnect();
-        process.exit(1);
-      }
-
-      console.log(chalk.blue("📤 Uploading logo to Cloudinary..."));
-
-      const logoPath = path.resolve(
-        __dirname,
-        "../../public/pathosaathi-logo.png"
-      );
-
-      if (!fs.existsSync(logoPath)) {
-        console.log(
-          chalk.red(
-            `❌ Logo file not found at: ${logoPath}\nPlease ensure the logo exists before running the seed.`
-          )
-        );
-        await mongoose.disconnect();
-        process.exit(1);
-      }
-
-      let logoUrl: string;
-      try {
-        const uploadResult = await uploadImage(logoPath, {
-          folder: "pathosaathi/branding",
-          tags: ["logo", "branding", "pathosaathi"],
-        });
-        logoUrl = uploadResult.url;
-        console.log(
-          chalk.green(`✅ Logo uploaded successfully: ${uploadResult.publicId}`)
-        );
-      } catch (error) {
-        console.error(
-          chalk.red("❌ Error uploading logo to Cloudinary:"),
-          error
-        );
-        await mongoose.disconnect();
-        process.exit(1);
-      }
-
-      const branding = new BrandingModel({
-        tenantPrefix: DEFAULT_TENANTS.ROOT,
-        name: brandingAnswers.name,
-        description: brandingAnswers.description || undefined,
-        logo: logoUrl,
-        theme: theme._id,
-        isActive: true,
-      });
-
-      await branding.save();
-
-      console.log(
-        chalk.green(
-          `✅ Branding created successfully: ${branding.name} (${branding.identifier})`
-        )
-      );
-      console.log(chalk.cyan(`   Theme: ${theme.name} (${theme.identifier})`));
-      console.log(chalk.cyan(`   Logo URL: ${logoUrl}`));
     }
+
+    console.log(
+      chalk.bold.green(
+        "\n🎉 Multi-tenant super admin setup completed successfully!\n"
+      )
+    );
+
+    console.log(chalk.bold.cyan("📋 Access Information:"));
+    console.log(chalk.cyan(`   Email: ${answers.email}`));
+    console.log(chalk.cyan(`   Role: SUPERADMIN`));
+    console.log(chalk.cyan(`   Partner: ${pathosaathiPartner.companyName}`));
+
+    if (pathosaathiPartner.subdomain) {
+      const subdomainUrl = MultiTenantMiddleware.generateSubdomainUrl(
+        pathosaathiPartner.subdomain
+      );
+      console.log(chalk.cyan(`   Subdomain Access: ${subdomainUrl}`));
+    }
+
+    if (pathosaathiPartner.customDomain) {
+      console.log(
+        chalk.cyan(
+          `   Custom Domain Access: https://${pathosaathiPartner.customDomain}`
+        )
+      );
+    }
+
+    console.log(
+      chalk.cyan(
+        `   Main Domain Access: http://localhost:3000 or http://127.0.0.1:3000`
+      )
+    );
+
+    console.log(chalk.bold.yellow("\n⚠️  Important Notes:"));
+    console.log(
+      chalk.yellow("   • Root users (superadmin) can access from main domain")
+    );
+    console.log(
+      chalk.yellow(
+        "   • Partner users will be restricted to their configured domains"
+      )
+    );
+    console.log(
+      chalk.yellow("   • Configure DNS/hosts file to test subdomains locally")
+    );
+    console.log(
+      chalk.yellow(
+        "   • Use /api/branding endpoints to customize partner themes"
+      )
+    );
 
     console.log(chalk.green("\n🎉 Super Admin Setup Complete!"));
 
@@ -459,4 +673,18 @@ const seedSuperAdmin = async () => {
   }
 };
 
-seedSuperAdmin();
+process.on("unhandledRejection", (error) => {
+  console.error(chalk.red("💥 Unhandled Promise Rejection:"), error);
+  process.exit(1);
+});
+
+process.on("uncaughtException", (error) => {
+  console.error(chalk.red("💥 Uncaught Exception:"), error);
+  process.exit(1);
+});
+
+export default seedSuperAdmin;
+
+if (require.main === module) {
+  seedSuperAdmin();
+}
